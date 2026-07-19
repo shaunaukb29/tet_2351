@@ -4,33 +4,33 @@
       "fault",
       "normal"
     ],
-    "n": 3636,
+    "n": 8225,
     "degenerate": false,
-    "cv_bal_acc": 0.657,
-    "cv_bal_acc_std": 0.088,
+    "cv_bal_acc": 0.669,
+    "cv_bal_acc_std": 0.043,
     "cv_folds": 25,
-    "majority_acc": 0.741,
-    "n_videos": 326,
-    "weak_signal": "balanced accuracy is within ~2\u03c3 of chance (0.5) \u2014 this head carries little signal; needs more/cleaner data",
-    "temperature": 4.144
+    "majority_acc": 0.73,
+    "n_videos": 864,
+    "temperature": 2.206
   },
   "knock": {
     "classes": [
       "knock",
       "normal_idle"
     ],
-    "n": 1539,
+    "n": 3146,
     "degenerate": false,
-    "cv_bal_acc": 0.938,
-    "cv_bal_acc_std": 0.038,
+    "cv_bal_acc": 0.943,
+    "cv_bal_acc_std": 0.022,
     "cv_folds": 25,
-    "majority_acc": 0.901,
-    "n_videos": 235,
-    "temperature": 1.86
+    "majority_acc": 0.873,
+    "n_videos": 551,
+    "temperature": 1.979
   },
   "cause": {
     "classes": [
       "accessories",
+      "bearing_other",
       "belt",
       "brakes",
       "cv_axle",
@@ -38,22 +38,25 @@
       "engine_internal",
       "exhaust",
       "fuel_ignition",
+      "misfire",
       "power_steering",
       "suspension",
+      "timing",
       "transmission",
       "turbo",
       "vacuum_leak",
+      "valvetrain",
       "water_pump",
       "wheel_bearing",
       "wheel_tire"
     ],
-    "n": 1909,
+    "n": 3874,
     "degenerate": false,
-    "cv_bal_acc": 0.168,
-    "cv_bal_acc_std": 0.02,
-    "cv_folds": 10,
-    "majority_acc": 0.187,
-    "n_videos": 196,
+    "cv_bal_acc": 0.134,
+    "cv_bal_acc_std": 0.012,
+    "cv_folds": 20,
+    "majority_acc": 0.146,
+    "n_videos": 485,
     "temperature": 1.0
   },
   "region": {
@@ -65,13 +68,13 @@
       "exhaust",
       "suspension/steering"
     ],
-    "n": 1863,
+    "n": 3476,
     "degenerate": false,
-    "cv_bal_acc": 0.314,
-    "cv_bal_acc_std": 0.044,
+    "cv_bal_acc": 0.327,
+    "cv_bal_acc_std": 0.038,
     "cv_folds": 25,
-    "majority_acc": 0.359,
-    "n_videos": 184,
+    "majority_acc": 0.332,
+    "n_videos": 388,
     "temperature": 1.0
   },
   "knock_region": {
@@ -83,13 +86,13 @@
       "exhaust",
       "suspension/steering"
     ],
-    "n": 110,
+    "n": 220,
     "degenerate": false,
-    "cv_bal_acc": 0.172,
-    "cv_bal_acc_std": 0.051,
-    "cv_folds": 10,
-    "majority_acc": 0.655,
-    "n_videos": 39,
+    "cv_bal_acc": 0.109,
+    "cv_bal_acc_std": 0.046,
+    "cv_folds": 20,
+    "majority_acc": 0.445,
+    "n_videos": 71,
     "temperature": 1.0
   },
   "triage": {
@@ -97,13 +100,14 @@
       "chassis",
       "engine"
     ],
-    "n": 1863,
+    "n": 3476,
     "degenerate": false,
-    "cv_bal_acc": 0.678,
-    "cv_bal_acc_std": 0.047,
+    "cv_bal_acc": 0.632,
+    "cv_bal_acc_std": 0.079,
     "cv_folds": 25,
-    "majority_acc": 0.675,
-    "n_videos": 184,
-    "temperature": 3.959
+    "majority_acc": 0.64,
+    "n_videos": 388,
+    "weak_signal": "balanced accuracy is within ~2\u03c3 of chance (0.5) \u2014 this head carries little signal; needs more/cleaner data",
+    "temperature": 3.692
   }
 }
