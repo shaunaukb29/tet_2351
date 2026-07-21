@@ -317,20 +317,7 @@ def sanitize_and_check_audio(uploaded_file) -> str | None:
         info = sf.info(tmp_path)
         duration = info.duration
         
-        # Enforce 15 seconds limit
-        if duration > 15.0:
-            st.warning("Recording exceeds 15 seconds limit. Truncating to the first 15 seconds.")
-            y, sr = librosa.load(tmp_path, sr=None)
-            y_trimmed = y[:int(15.0 * sr)]
-            # IMPORTANT: soundfile cannot encode MP3 (or several other input
-            # formats) — writing truncated audio back into a file with the
-            # ORIGINAL suffix (e.g. .mp3) silently produces an invalid/garbage
-            # file, which downstream reads as "no usable audio" every time.
-            # Always re-save as .wav, which soundfile can always write.
-            os.unlink(tmp_path)
-            tmp_path = tmp_path + ".trimmed.wav"
-            sf.write(tmp_path, y_trimmed, sr)
-            
+        # No duration cap — full recording is used as-is.
     except Exception as e:
         st.error("Uploaded file is corrupt or not a valid audio recording.")
         try:
