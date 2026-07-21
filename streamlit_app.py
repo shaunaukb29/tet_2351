@@ -685,15 +685,22 @@ if audio_file:
                     obd_codes = [c.strip().upper() for c in obd_input.split(",") if c.strip()]
                     try:
                         result = clf.diagnose(tmp_path)
-                    except Exception as exc:
+                    except BaseException as exc:  # catch EVERYTHING, not just Exception
+                        import traceback
                         diag_error = exc
+                        print("[diagnose] FAILED:", file=sys.stderr, flush=True)
+                        traceback.print_exc(file=sys.stderr)
+                        st.exception(exc)  # full traceback, visible in the UI itself
                     if result is not None:
                         try:
                             from cardiag.inference.reasoning import ReasoningEngine
                             reasoning = ReasoningEngine().reason(result.to_dict(), obd_codes)
-                        except Exception as exc:
+                        except BaseException as exc:
+                            import traceback
                             reasoning = None
-                            st.warning(f"Reasoning engine error: {exc}")
+                            print("[reasoning] FAILED:", file=sys.stderr, flush=True)
+                            traceback.print_exc(file=sys.stderr)
+                            st.exception(exc)
                 st.session_state["carithm_diagnosis"] = {
                     "audio_key": audio_key,
                     "result": result,
