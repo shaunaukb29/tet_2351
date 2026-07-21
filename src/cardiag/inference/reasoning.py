@@ -22,6 +22,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from cardiag.inference.evidence import EvidenceGraph, Hypothesis, EvidenceLink, Observation
+from cardiag.inference.formatter import DiagnosisFormatter
+import uuid
+
 _HERE = Path(__file__).resolve().parent
 _DATA = _HERE.parents[2] / "data"
 
@@ -185,12 +189,43 @@ class ReasoningEngine:
             hits = retrieve_similar(description)
             observations.extend(observe_retrieval(hits))
 
+        # Perform CLAP audio similarity search
+        audio_path = diag_dict.get("file")
+        audio_hits = []
+        import os
+        import numpy as np
+        if audio_path and os.path.exists(audio_path):
+            try:
+                from cardiag.audio.embed import model_vectors
+                from cardiag.audio.vector_db import find_similar_audio
+                ev = model_vectors(audio_path)
+                if ev.vectors.shape[0] > 0:
+                    mean_vec = np.mean(ev.vectors, axis=0)
+                    mean_vec = mean_vec / (np.linalg.norm(mean_vec) or 1.0)
+                    audio_hits = find_similar_audio(mean_vec, top_k=3)
+                    
+                    for hit in audio_hits:
+                        raw_cause = hit.get("cause") or hit.get("l1") or hit.get("kind") or "Reference Case"
+                        cause_name = raw_cause.replace("_", " ").title()
+                        observations.append(Observation(
+                            id=f"sim_{uuid.uuid4().hex[:8]}",
+                            source="audio_similarity",
+                            category="audio_similarity",
+                            component=hit.get("cause", ""),
+                            subsystem="",
+                            confidence=hit.get("similarity", 0.5),
+                            label=f"Acoustically matches reference case of {cause_name} ({hit['similarity']:.0%} similarity).",
+                            features={"clip_id": hit["clip_id"], "video": hit["video"]}
+                        ))
+            except Exception as e:
+                logging.warning(f"Failed to run audio similarity search: {e}")
+
         active_subsystems = set()
         primary_subsystem = None
         for obs in observations:
             if obs.subsystem:
                 active_subsystems.add(obs.subsystem)
-                if not primary_subsystem and obs.source in ("audio", "description"):
+                if not primary_subsystem and obs.category in ("audio", "description"):
                     primary_subsystem = obs.subsystem
 
         desc_cat = _classify(description) if description else None
@@ -225,11 +260,11 @@ class ReasoningEngine:
         # Overwrite primary_subsystem with the actual winning component's subsystem 
         # so follow-up questions and assessment texts are properly aligned!
         if components:
-            primary_subsystem = components[0].get("subsystem", primary_subsystem)
+            primary_subsystem = components[0].subsystem or primary_subsystem
 
         confidence = self._calibrate_confidence(components, observations, diag_dict)
 
-        matches = [obs.subsystem for obs in observations if obs.source == "audio" and any(o.subsystem == obs.subsystem for o in observations if o.source != "audio")]
+        matches = [obs.subsystem for obs in observations if obs.category == "audio" and any(o.subsystem == obs.subsystem for o in observations if o.category != "audio")]
 
         # 7. OBD interpretations
         obd_interps = [
@@ -253,25 +288,27 @@ class ReasoningEngine:
         explanation = self._explain(diag_dict, parsed, matches, backend,
                                     description=description)
 
-        result: dict = {
-            "parsed_codes":           parsed,
-            "coherence_matches":      matches,
-            "explanation":            explanation,
-            "assessment":             assessment,
-            "confidence":             confidence,
-            "description_interpretation": sym_features.get("narrative", "") if sym_features else "",
-            "components":             components,
-            "obd_interpretations":    obd_interps,
-            "primary_subsystem":      primary_subsystem or "",
-        }
-        if followup:
-            result["followup_question"] = followup.text
-            result["followup_id"]       = followup.id
-            result["followup_options"]  = followup.options
-            result["followup_yes_multipliers"] = followup.yes_multipliers
-            result["followup_no_multipliers"]  = followup.no_multipliers
-
-        return result
+        graph = EvidenceGraph(
+            raw_predictions={"fault_probability": diag_dict.get("fault_probability")},
+            observations=observations,
+            hypotheses=components
+        )
+        
+        formatter = DiagnosisFormatter()
+        return formatter.format(
+            graph=graph,
+            diag_dict=diag_dict,
+            parsed_codes=parsed,
+            matches=matches,
+            sym_features=sym_features,
+            primary_subsystem=primary_subsystem,
+            followup=followup,
+            obd_interps=obd_interps,
+            confidence=confidence,
+            assessment=assessment,
+            explanation=explanation,
+            similar_cases=audio_hits
+        )
 
     # ---------------------------------------------------------------- candidate backfill
 
@@ -296,7 +333,7 @@ class ReasoningEngine:
             merged.append(types.SimpleNamespace(
                 name=part,
                 subsystem=cause.get("subsystem", "") or "",
-                prior=max(0.001, min(0.999, float(cause.get("probability", 0.05)))),
+                prior=max(0.001, min(0.999, float(cause.get("p", cause.get("probability", 0.05))))),
                 boosting_codes=cause.get("boosting_codes", ()) or (),
                 boosting_symptoms=cause.get("boosting_symptoms", ()) or (),
                 tests=cause.get("tests", []) or [],
@@ -309,7 +346,7 @@ class ReasoningEngine:
 
     # ---------------------------------------------------------------- component scoring
 
-    def _fuse_evidence(self, candidates: list[dict], observations: list[Any], primary_subsystem: str | None, raw_desc: str = "", sym_features: dict | None = None) -> list[dict]:
+    def _fuse_evidence(self, candidates: list, observations: list[Observation], primary_subsystem: str | None, raw_desc: str = "", sym_features: dict | None = None) -> list[Hypothesis]:
         import math
         scored = []
         desc_lower = raw_desc.lower()
@@ -318,76 +355,80 @@ class ReasoningEngine:
             # log-odds
             prior = max(0.001, min(0.999, comp.prior))
             log_odds = math.log(prior / (1 - prior))
-            evidence_breakdown = {}
-            evidence_strings = []
+            links = []
 
             for obs in observations:
                 # Basic matching - this should ideally use hierarchy
                 matches_comp = obs.matches(comp.name, comp.subsystem)
                 # Or if the observation has a code in boosting_codes
-                if obs.source == "obd" and obs.features.get("code", "").upper() in comp.boosting_codes:
+                if obs.category == "obd" and obs.features.get("code", "").upper() in comp.boosting_codes:
                     matches_comp = True
 
                 # Description text matching: search raw description, not obs label
-                if obs.source == "description":
+                if obs.category == "description":
                     kw_hits = sum(1 for kw in comp.boosting_symptoms if kw in desc_lower)
                     if kw_hits > 0:
                         # Cap the text boost so it acts as corroboration, not an override
-                        contribution = min(1.0, obs.weight * (0.3 + 0.2 * kw_hits))
+                        contribution = min(1.0, obs.confidence * (0.3 + 0.2 * kw_hits))
                         log_odds += contribution
-                        evidence_breakdown[obs.source] = evidence_breakdown.get(obs.source, 0.0) + contribution
-                        if obs.label and obs.label not in evidence_strings:
-                            evidence_strings.append(obs.label)
+                        links.append(EvidenceLink(
+                            observation_id=obs.id,
+                            relationship="supports",
+                            weight=contribution,
+                            explanation=obs.label
+                        ))
                         continue
 
             # Group retrieval hits to prevent 20 identical NHTSA complaints from pushing probability to 1.0 automatically.
             retrieval_hits = 0
-            retrieval_weight_sum = 0.0
+            retrieval_confidence_sum = 0.0
             
             # Did this component match ANY audio observation?
-            audio_matched = any(obs.source == "audio" and obs.matches(comp.name, comp.subsystem) for obs in observations)
+            audio_matched = any(obs.category == "audio" and obs.matches(comp.name, comp.subsystem) for obs in observations)
 
             for obs in observations:
                 if obs.matches(comp.name, comp.subsystem):
                     # Boost
-                    if obs.source == "audio":
+                    if obs.category == "audio":
                         if not getattr(comp, "acoustic", True):
                             continue # non-acoustic parts cannot be diagnosed by audio
-                        boost = obs.weight * 2.0
+                        boost = obs.confidence * 2.0
                         log_odds += boost
-                        evidence_breakdown[obs.source] = evidence_breakdown.get(obs.source, 0.0) + boost
-                    elif obs.source == "retrieval":
+                        links.append(EvidenceLink(observation_id=obs.id, relationship="supports", weight=boost, explanation=obs.label))
+                    elif obs.category == "retrieval":
                         retrieval_hits += 1
-                        retrieval_weight_sum += obs.weight
-                    elif obs.source == "obd":
+                        retrieval_confidence_sum += obs.confidence
+                    elif obs.category == "obd":
                         if obs.features.get("code", "").upper() in comp.boosting_codes:
-                            boost = obs.weight * 1.5
+                            boost = obs.confidence * 1.5
                             log_odds += boost
-                            evidence_breakdown[obs.source] = evidence_breakdown.get(obs.source, 0.0) + boost
+                            links.append(EvidenceLink(observation_id=obs.id, relationship="supports", weight=boost, explanation=obs.label))
                         elif obs.subsystem and obs.subsystem.lower() in comp.subsystem.lower():
-                            boost = obs.weight * 0.5
+                            boost = obs.confidence * 0.5
                             log_odds += boost
-                            evidence_breakdown[obs.source] = evidence_breakdown.get(obs.source, 0.0) + boost
-                    elif obs.source not in ("description", "audio", "retrieval", "obd"):
-                        boost = obs.weight
+                            links.append(EvidenceLink(observation_id=obs.id, relationship="supports", weight=boost, explanation=obs.label))
+                    elif obs.category == "audio_similarity":
+                        # Stronger boost for high similarity matching failure recording
+                        boost = obs.confidence * 2.0
                         log_odds += boost
-                        evidence_breakdown[obs.source] = evidence_breakdown.get(obs.source, 0.0) + boost
+                        links.append(EvidenceLink(observation_id=obs.id, relationship="supports", weight=boost, explanation=obs.label))
+                    elif obs.category not in ("description", "audio", "retrieval", "obd", "audio_similarity"):
+                        boost = obs.confidence
+                        log_odds += boost
+                        links.append(EvidenceLink(observation_id=obs.id, relationship="supports", weight=boost, explanation=obs.label))
                     
-                    if obs.source != "retrieval" and obs.label and obs.label not in evidence_strings:
-                        evidence_strings.append(obs.label)
-                elif obs.source == "audio" and not audio_matched and obs.subsystem and obs.subsystem != comp.subsystem:
+                elif obs.category == "audio" and not audio_matched and obs.subsystem and obs.subsystem != comp.subsystem:
                     # Audio evidence that contradicts this component's subsystem penalizes it,
                     # but only if this component didn't match ANY of the audio predictions.
-                    penalty = -(obs.weight * 0.5)
+                    penalty = -(obs.confidence * 0.5)
                     log_odds += penalty
-                    evidence_breakdown[obs.source] = evidence_breakdown.get(obs.source, 0.0) + penalty
+                    links.append(EvidenceLink(observation_id=obs.id, relationship="refutes", weight=penalty, explanation="Contradicts primary audio signature."))
                     
             if retrieval_hits > 0:
                 # Add a single capped boost for all retrieval hits combined
-                boost = min(0.75, retrieval_weight_sum / math.sqrt(retrieval_hits))
+                boost = min(0.75, retrieval_confidence_sum / math.sqrt(retrieval_hits))
                 log_odds += boost
-                evidence_breakdown["retrieval"] = evidence_breakdown.get("retrieval", 0.0) + boost
-                evidence_strings.append(f"Corroborated by {retrieval_hits} similar NHTSA owner complaints or recalls.")
+                links.append(EvidenceLink(observation_id="retrieval_agg", relationship="supports", weight=boost, explanation=f"Corroborated by {retrieval_hits} similar NHTSA owner complaints or recalls."))
 
             # ---- Mechanical Constraints & Contradiction Penalties -----------------
             text_locations = sym_features.get("location", []) if sym_features else []
@@ -398,8 +439,8 @@ class ReasoningEngine:
                 
                 # If this component's subsystem is physically impossible given the stated location
                 if comp.subsystem not in valid_subsystems:
-                    audio_conf = sum(obs.weight for obs in observations if obs.source == "audio" and obs.matches(comp.name, comp.subsystem))
-                    text_conf = sum(obs.weight for obs in observations if obs.source == "description") or 1.0
+                    audio_conf = sum(obs.confidence for obs in observations if obs.category == "audio" and obs.matches(comp.name, comp.subsystem))
+                    text_conf = sum(obs.confidence for obs in observations if obs.category == "description") or 1.0
                     
                     # Base mechanical constraint penalty
                     penalty = -1.5
@@ -409,8 +450,7 @@ class ReasoningEngine:
                         penalty -= (audio_conf * text_conf * 2.0)
                         
                     log_odds += penalty
-                    evidence_breakdown["mechanical_constraint"] = penalty
-                    evidence_strings.append("Location mechanically contradicts user description.")
+                    links.append(EvidenceLink(observation_id="mech_constraint", relationship="refutes", weight=penalty, explanation="Location mechanically contradicts user description."))
 
             # ---- Structured feature gates -----------------------------------------
             # Use the parsed SymptomProfile to strongly adjust scores based on
@@ -458,28 +498,23 @@ class ReasoningEngine:
             probability = 1 / (1 + _math.exp(-log_odds))
 
             if probability >= 0.05:
-                scored.append({
-                    "name": comp.name,
-                    "subsystem": comp.subsystem,
-                    "probability": round(probability, 3),
-                    "raw_log_odds": log_odds,
-                    "evidence": evidence_strings,
-                    "evidence_breakdown": evidence_breakdown,
-                    "tests": comp.tests,
-                    "severity": getattr(comp, "severity", "moderate"),
-                    "driveability": getattr(comp, "driveability", "monitor")
-                })
+                scored.append((log_odds, Hypothesis(
+                    id=f"hypo_{uuid.uuid4().hex[:8]}",
+                    name=comp.name,
+                    subsystem=comp.subsystem,
+                    probability=round(probability, 3),
+                    evidence_links=links,
+                    recommended_tests=comp.tests,
+                    severity=getattr(comp, "severity", "moderate"),
+                    driveability=getattr(comp, "driveability", "monitor")
+                )))
 
         # Sort by raw log odds to perfectly break ties at the extremes
-        scored.sort(key=lambda x: -x["raw_log_odds"])
+        scored.sort(key=lambda x: -x[0])
         
-        # Clean up internal sorting key before returning
-        for s in scored:
-            s.pop("raw_log_odds")
-            
-        return scored[:5]
+        return [h[1] for h in scored[:5]]
 
-    def _calibrate_confidence(self, components: list[dict], observations: list[Any], diag_dict: dict) -> float:
+    def _calibrate_confidence(self, components: list[Hypothesis], observations: list[Any], diag_dict: dict) -> float:
         fault_p = float(diag_dict.get("fault_probability", 0.0))
         audio_quality = fault_p
 
@@ -490,7 +525,7 @@ class ReasoningEngine:
 
         separation = 0.5
         if len(components) > 1:
-            separation = components[0]["probability"] - components[1]["probability"]
+            separation = components[0].probability - components[1].probability
         elif len(components) == 1:
             separation = 1.0
 
@@ -515,20 +550,20 @@ class ReasoningEngine:
     # ---------------------------------------------------------------- assessment paragraph
 
     def _build_assessment(self, diag: dict, subsystem: str | None,
-                           components: list[dict], parsed_codes: list[dict],
+                           components: list[Hypothesis], parsed_codes: list[dict],
                            desc_narrative: str) -> str:
         parts: list[str] = []
         fault_p = float(diag.get("fault_probability", 0))
         sub_label = (subsystem or "").replace("_", " ")
 
-        top_probs = [c["probability"] for c in components[:2]]
+        top_probs = [c.probability for c in components[:2]]
         
         # Check for uncertainty mode
         if len(top_probs) >= 2:
             gap = top_probs[0] - top_probs[1]
             # If the leading candidate is not extremely strong (< 65%) and the gap is small (< 15%)
             if top_probs[0] < 0.65 and gap < 0.15:
-                top_names = [c["name"] for c in components[:3]]
+                top_names = [c.name for c in components[:3]]
                 c_list = ", ".join(top_names)
                 return (f"The diagnostic evidence is currently weak or conflicting. "
                         f"I cannot confidently distinguish between: {c_list}. "
@@ -576,22 +611,22 @@ class ReasoningEngine:
         if components:
             top = components[0]
             second = components[1] if len(components) > 1 else None
-            gap = top["probability"] - (second["probability"] if second else 0)
+            gap = top.probability - (second.probability if second else 0)
             if fault_p > 0 and fault_p < 0.60:
                 parts.append("The audio signal is weak or ambiguous. Possible fault, but cannot distinguish specific component with high certainty.")
                 # We still output the categories in the UI, but the assessment text warns about false precision.
-            elif top["probability"] > 0.45 and gap > 0.12:
-                parts.append(f"The leading suspect is {top['name']}.")
+            elif top.probability > 0.45 and gap > 0.12:
+                parts.append(f"The leading suspect is {top.name}.")
             elif second:
                 parts.append(
-                    f"The strongest candidates are {top['name']} and {second['name']}."
+                    f"The strongest candidates are {top.name} and {second.name}."
                 )
 
         return " ".join(parts)
 
     # ---------------------------------------------------------------- follow-up selection
 
-    def _select_followup(self, subsystem: str | None, components: list[dict],
+    def _select_followup(self, subsystem: str | None, components: list[Hypothesis],
                           asked_ids: list[str], sym_features: dict | None = None) -> dict | None:
         if not subsystem or not components:
             return None
@@ -602,8 +637,8 @@ class ReasoningEngine:
         if not questions:
             return None
 
-        top_names = {c["name"] for c in components[:3]}
-        top_probs = [c["probability"] for c in components[:2]]
+        top_names = {c.name for c in components[:3]}
+        top_probs = [c.probability for c in components[:2]]
 
         # Don't ask if already confident: top > 60% and gap > 25 pp
         if (len(top_probs) >= 2 and
@@ -641,18 +676,18 @@ class ReasoningEngine:
             # Information gain proxy: variance in multipliers among the top 3 components
             score = 0.0
             if len(components) >= 2:
-                c1 = components[0]["name"]
-                c2 = components[1]["name"]
+                c1 = components[0].name
+                c2 = components[1].name
                 yes_diff = abs(q.yes_multipliers.get(c1, 1.0) - q.yes_multipliers.get(c2, 1.0))
                 no_diff = abs(q.no_multipliers.get(c1, 1.0) - q.no_multipliers.get(c2, 1.0))
                 score = yes_diff + no_diff
                 
                 if len(components) >= 3:
-                    c3 = components[2]["name"]
+                    c3 = components[2].name
                     score += abs(q.yes_multipliers.get(c1, 1.0) - q.yes_multipliers.get(c3, 1.0))
                     score += abs(q.no_multipliers.get(c1, 1.0) - q.no_multipliers.get(c3, 1.0))
             else:
-                score = 1.0 if (q.target_components and components[0]["name"] in q.target_components) else 0.5
+                score = 1.0 if (q.target_components and components[0].name in q.target_components) else 0.5
                 
             if score > best_score:
                 best_score = score
@@ -726,38 +761,60 @@ class ReasoningEngine:
 
 # ---------------------------------------------------------------- follow-up update (used by /api/followup)
 
-def apply_followup_answer(components: list[dict], question_id: str,
+def apply_followup_answer(components: list, question_id: str,
                            answer: str, subsystem: str,
                            asked_ids: list[str]) -> dict:
     """Apply a yes/no follow-up answer and return updated components + next question.
 
     Called by the web layer; does not touch audio models or the database.
+    Components may arrive as dicts (from the UI) or Hypothesis objects.
     """
+    import copy
     from cardiag.inference.components import get_followup_question
+
+    # Normalize: if components are dicts (from the UI), wrap them into Hypothesis objects
+    normalized = []
+    for comp in components:
+        if isinstance(comp, dict):
+            normalized.append(Hypothesis(
+                id=comp.get("id", f"hypo_{uuid.uuid4().hex[:8]}"),
+                name=comp.get("name", ""),
+                subsystem=comp.get("subsystem", ""),
+                probability=float(comp.get("probability", 0)),
+                evidence_links=[],
+                recommended_tests=comp.get("tests", []),
+                severity=comp.get("severity", "moderate"),
+                driveability=comp.get("driveability", "monitor"),
+            ))
+        else:
+            normalized.append(comp)
 
     q = get_followup_question(question_id)
     if q is None or answer == "skip":
-        return {"components": components, "followup_question": None,
+        return {"components": [c.to_legacy_dict() for c in normalized],
+                "followup_question": None,
                 "followup_id": None, "followup_options": None}
 
     multipliers = q.yes_multipliers if answer == "yes" else q.no_multipliers
 
     updated = []
-    for comp in components:
-        m = multipliers.get(comp["name"], 1.0)
-        updated.append({**comp, "probability": comp["probability"] * m})
+    for comp in normalized:
+        m = multipliers.get(comp.name, 1.0)
+        new_comp = copy.deepcopy(comp)
+        new_comp.probability = comp.probability * m
+        updated.append(new_comp)
 
-    total = sum(c["probability"] for c in updated) or 1.0
+    total = sum(c.probability for c in updated) or 1.0
     for c in updated:
-        c["probability"] = round(c["probability"] / total, 3)
-    updated.sort(key=lambda x: -x["probability"])
+        c.probability = round(c.probability / total, 3)
+    updated.sort(key=lambda x: -x.probability)
 
     # Select next question
     new_asked = asked_ids + [question_id]
     engine = ReasoningEngine()
     next_q = engine._select_followup(subsystem, updated, asked_ids=new_asked)
 
-    result: dict = {"components": updated, "asked_ids": new_asked}
+    result: dict = {"components": [c.to_legacy_dict() for c in updated], "asked_ids": new_asked}
     if next_q:
         result["followup_question"] = next_q.text
         result["followup_id"]       = next_q.id

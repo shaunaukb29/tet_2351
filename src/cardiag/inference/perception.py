@@ -1,44 +1,5 @@
-from dataclasses import dataclass
-
-
-@dataclass
-class Observation:
-    """A single piece of extracted evidence."""
-    source: str          # "audio", "description", "obd", "followup", "retrieval"
-    component: str       # target component name (or "" for subsystem-level)
-    subsystem: str       # target subsystem (or "" if general)
-    weight: float        # contribution strength (0.0–1.0)
-    label: str           # human-readable evidence sentence
-    features: dict       # structured features (character, timing, location, etc.)
-
-    def matches(self, comp_name: str, comp_subsystem: str) -> bool:
-        """Check if this observation applies to the given component or subsystem.
-
-        Normalises underscores → spaces so that audio-model class names
-        (e.g. ``wheel_bearing``, ``water_pump``) match component names
-        (``Wheel bearing``) and subsystem keys (``brakes``).
-        """
-        def _norm(s: str | None) -> str:
-            """Normalize optional evidence fields without rejecting an unknown DTC.
-
-            The OBD knowledge base does not classify every valid code into one
-            of the app's mechanical subsystems. An unclassified code is still
-            useful to display, but it must not stop audio reasoning.
-            """
-            return (s or "").lower().replace("_", " ")
-
-        obs_comp = _norm(self.component)
-        obs_sub = _norm(self.subsystem)
-        cn = _norm(comp_name)
-        cs = _norm(comp_subsystem)
-
-        if obs_comp and obs_comp in cn:
-            return True
-        if obs_sub and (obs_sub in cs or obs_sub in cn):
-            return True
-        if not self.component and not self.subsystem:
-            return True
-        return False
+import uuid
+from cardiag.inference.evidence import Observation
 
 
 def observe_audio(diag_dict: dict) -> list[Observation]:
@@ -53,10 +14,12 @@ def observe_audio(diag_dict: dict) -> list[Observation]:
             c_prob = cause.get("p", 0.0)
             weight = fault_prob * c_prob
             obs.append(Observation(
-                source="audio",
+                id=f"audio_{uuid.uuid4().hex[:8]}",
+                source="clap_audio_model",
+                category="audio",
                 component="",
                 subsystem=c_name, # Audio causes map roughly to subsystems / high-level groups
-                weight=weight,
+                confidence=weight,
                 label=f"Audio indicates {c_name} issue (probability: {c_prob:.0%})",
                 features={"probability": c_prob, "fault_probability": fault_prob}
             ))
@@ -71,10 +34,12 @@ def observe_description(sym_features: dict) -> list[Observation]:
         return obs
 
     obs.append(Observation(
-        source="description",
+        id=f"desc_{uuid.uuid4().hex[:8]}",
+        source="description_parser",
+        category="description",
         component="",
         subsystem="",
-        weight=1.0,
+        confidence=1.0,
         label=sym_features.get("narrative", ""),
         features={
             "location": profile.location,
@@ -100,10 +65,12 @@ def observe_obd(parsed_codes: list[dict]) -> list[Observation]:
         desc = code_info.get("description", "")
         code = code_info.get("code", "")
         obs.append(Observation(
-            source="obd",
+            id=f"obd_{code.lower()}_{uuid.uuid4().hex[:4]}",
+            source="user_obd_input",
+            category="obd",
             component="",
             subsystem=subsystem,
-            weight=1.0,
+            confidence=1.0,
             label=f"OBD code {code} present: {desc}",
             features={"code": code}
         ))
@@ -122,10 +89,12 @@ def observe_retrieval(hits: list[dict]) -> list[Observation]:
     obs = []
     for hit in hits:
         obs.append(Observation(
-            source="retrieval",
+            id=f"rag_{uuid.uuid4().hex[:8]}",
+            source="retrieval_db",
+            category="retrieval",
             component=hit.get("component", ""),
             subsystem=hit.get("subsystem", ""),
-            weight=hit.get("weight", 0.5),
+            confidence=hit.get("weight", 0.5),
             label=hit.get("label", ""),
             features={}
         ))
