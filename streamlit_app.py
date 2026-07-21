@@ -720,15 +720,29 @@ if audio_file:
                     st.error(f"Audio analysis failed: {diag_error}")
 
             # Always render whatever we have — never silently show only the caption
-            if reasoning:
+            # Always render whatever we have — never silently show only the caption
+            reasoning_has_content = bool(reasoning) and any(
+                reasoning.get(k) for k in
+                ("obd_interpretations", "assessment", "components", "similar_cases")
+            )
+            if reasoning_has_content:
                 try:
                     render_reasoning(reasoning, obd_codes)
                 except Exception as exc:
                     st.warning(f"Result rendering error: {exc}")
             elif result is not None and not diag_error:
-                # Diagnosis ran but reasoning returned nothing (edge case)
-                st.info("Audio processed — no strong fault candidates identified. "
-                        "Try adding OBD-II codes or a fault description for a more complete analysis.")
+                # Diagnosis ran but reasoning returned nothing usable — show the
+                # raw verdict/notes instead of nothing at all.
+                st.info("No strong fault candidates identified from structured reasoning. "
+                        "Showing the raw model output below.")
+                rd = result.to_dict() if hasattr(result, "to_dict") else {}
+                st.write(f"**Verdict:** {rd.get('verdict', 'unknown')}")
+                st.write(f"**Fault probability:** {pct(float(rd.get('fault_probability', 0.0)))}")
+                if rd.get("note"):
+                    st.caption(rd["note"])
+                if not reasoning_has_content and reasoning is not None:
+                    print(f"[reasoning] empty content, raw dict: {reasoning}",
+                          file=sys.stderr, flush=True)
 
             st.caption("Decision support only — not a replacement for professional inspection.")
 
