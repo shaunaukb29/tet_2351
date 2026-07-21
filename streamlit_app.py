@@ -24,6 +24,23 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────
+# Pre-download the CLAP model BEFORE the rest of the app renders.
+# This blocks here (with a visible spinner) instead of downloading
+# mid-interaction later in the app.
+# ─────────────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def _ensure_clap_downloaded() -> bool:
+    from cardiag import config
+    from transformers import ClapModel, ClapProcessor
+
+    ClapModel.from_pretrained(config.CLAP_MODEL)
+    ClapProcessor.from_pretrained(config.CLAP_MODEL)
+    return True
+
+with st.spinner("Downloading audio model (first run only, ~2GB)…"):
+    _ensure_clap_downloaded()
+
+# ─────────────────────────────────────────────────────────────────────────
 # CSS
 # ─────────────────────────────────────────────────────────────────────────
 st.markdown("""
