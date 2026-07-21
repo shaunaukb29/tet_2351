@@ -260,6 +260,12 @@ def load_model():
         pass
     from cardiag.audio.clap import Clap
     Clap()
+    # Pre-warm Silero VAD so it doesn't try to reach the network during diagnosis
+    try:
+        from silero_vad import load_silero_vad
+        load_silero_vad()
+    except Exception:
+        pass
     return Classifier.load()
 
 clf = load_model()
@@ -656,39 +662,52 @@ if audio_file:
         if run_diagnosis or (saved and saved.get("audio_key") == audio_key):
             if run_diagnosis:
                 with st.spinner("Analyzing audio — this takes a few seconds…"):
-                    result = clf.diagnose(tmp_path)
+                    diag_error = None
+                    result = None
+                    reasoning = None
                     obd_codes = [c.strip().upper() for c in obd_input.split(",") if c.strip()]
                     try:
-                        from cardiag.inference.reasoning import ReasoningEngine
-
-                        reasoning = ReasoningEngine().reason(result.to_dict(), obd_codes)
+                        result = clf.diagnose(tmp_path)
                     except Exception as exc:
-                        reasoning = None
-                        st.warning(f"Combined analysis unavailable: {exc}")
+                        diag_error = exc
+                    if result is not None:
+                        try:
+                            from cardiag.inference.reasoning import ReasoningEngine
+                            reasoning = ReasoningEngine().reason(result.to_dict(), obd_codes)
+                        except Exception as exc:
+                            reasoning = None
+                            st.warning(f"Reasoning engine error: {exc}")
                 st.session_state["carithm_diagnosis"] = {
                     "audio_key": audio_key,
                     "result": result,
                     "reasoning": reasoning,
                     "obd_codes": obd_codes,
+                    "diag_error": str(diag_error) if diag_error else None,
                     "asked_ids": [],
                 }
+                if diag_error:
+                    st.error(f"Audio analysis failed: {diag_error}")
             else:
                 result = saved["result"]
                 reasoning = saved.get("reasoning")
                 obd_codes = saved.get("obd_codes", [])
+                diag_error = saved.get("diag_error")
+                if diag_error:
+                    st.error(f"Audio analysis failed: {diag_error}")
 
-            # The reasoning cards are the user-facing result. Raw model telemetry is
-            # deliberately omitted to keep the report focused on actionable checks.
-            if obd_codes or reasoning:
+            # Always render whatever we have — never silently show only the caption
+            if reasoning:
                 try:
-                    if reasoning:
-                        render_reasoning(reasoning, obd_codes)
-
+                    render_reasoning(reasoning, obd_codes)
                 except Exception as exc:
-                    st.warning(f"Combined analysis unavailable: {exc}")
+                    st.warning(f"Result rendering error: {exc}")
+            elif result is not None and not diag_error:
+                # Diagnosis ran but reasoning returned nothing (edge case)
+                st.info("Audio processed — no strong fault candidates identified. "
+                        "Try adding OBD-II codes or a fault description for a more complete analysis.")
 
             st.caption("Decision support only — not a replacement for professional inspection.")
-            
+
             # Clean up the temporary file
             try:
                 os.unlink(tmp_path)
