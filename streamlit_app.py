@@ -24,23 +24,6 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────
-# Pre-download the CLAP model BEFORE the rest of the app renders.
-# This blocks here (with a visible spinner) instead of downloading
-# mid-interaction later in the app.
-# ─────────────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def _ensure_clap_downloaded() -> bool:
-    from cardiag import config
-    from transformers import ClapModel, ClapProcessor
-
-    ClapModel.from_pretrained(config.CLAP_MODEL)
-    ClapProcessor.from_pretrained(config.CLAP_MODEL)
-    return True
-
-with st.spinner("Downloading audio model (first run only, ~2GB)…"):
-    _ensure_clap_downloaded()
-
-# ─────────────────────────────────────────────────────────────────────────
 # CSS
 # ─────────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -325,7 +308,6 @@ def sanitize_and_check_audio(uploaded_file) -> str | None:
         duration = info.duration
         
         # Enforce 15 seconds limit
-        # Enforce 15 seconds limit
         if duration > 15.0:
             st.warning("Recording exceeds 15 seconds limit. Truncating to the first 15 seconds.")
             y, sr = librosa.load(tmp_path, sr=None)
@@ -375,6 +357,12 @@ with st.expander("➕  Add OBD-II codes (optional)"):
         "OBD-II codes",
         placeholder="e.g. P0300, P0301",
         help="Comma-separated DTC codes from your OBD scanner. Leave blank if you don't have any."
+    )
+    description_input = st.text_area(
+        "Describe the issue (optional)",
+        placeholder="e.g. knocking noise when accelerating uphill, worse when cold",
+        help="A short description of the symptom. Helps the reasoning engine even "
+             "when the audio alone is inconclusive."
     )
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -702,7 +690,8 @@ if audio_file:
                     if result is not None:
                         try:
                             from cardiag.inference.reasoning import ReasoningEngine
-                            reasoning = ReasoningEngine().reason(result.to_dict(), obd_codes)
+                            reasoning = ReasoningEngine().reason(
+                                result.to_dict(), obd_codes, description=description_input)
                         except BaseException as exc:
                             import traceback
                             reasoning = None
@@ -727,7 +716,6 @@ if audio_file:
                 if diag_error:
                     st.error(f"Audio analysis failed: {diag_error}")
 
-            # Always render whatever we have — never silently show only the caption
             # Always render whatever we have — never silently show only the caption
             reasoning_has_content = bool(reasoning) and any(
                 reasoning.get(k) for k in
