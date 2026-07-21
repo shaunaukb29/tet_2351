@@ -5,6 +5,16 @@ Acoustic fault triage + OBD-II reasoning
 
 import sys
 import os
+
+# MUST be set before numba/librosa/torch are imported anywhere in the process.
+# numba's default OpenMP threading layer can collide with PyTorch's own bundled
+# OpenMP runtime in the same process, causing native heap corruption
+# ("malloc(): unaligned tcache chunk detected") that aborts the whole worker
+# with no Python-level traceback. "workqueue" avoids OpenMP entirely.
+os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+
 import tempfile
 from html import escape
 from pathlib import Path
