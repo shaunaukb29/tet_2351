@@ -358,12 +358,6 @@ with st.expander("➕  Add OBD-II codes (optional)"):
         placeholder="e.g. P0300, P0301",
         help="Comma-separated DTC codes from your OBD scanner. Leave blank if you don't have any."
     )
-    description_input = st.text_area(
-        "Describe the issue (optional)",
-        placeholder="e.g. knocking noise when accelerating uphill, worse when cold",
-        help="A short description of the symptom. Helps the reasoning engine even "
-             "when the audio alone is inconclusive."
-    )
 
 # ─────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -690,8 +684,12 @@ if audio_file:
                     if result is not None:
                         try:
                             from cardiag.inference.reasoning import ReasoningEngine
-                            reasoning = ReasoningEngine().reason(
-                                result.to_dict(), obd_codes, description=description_input)
+                            rd = result.to_dict()
+                            print(f"[debug] obd_codes={obd_codes!r} "
+                                  f"verdict={rd.get('verdict')!r} "
+                                  f"causes={rd.get('causes')!r}",
+                                  file=sys.stderr, flush=True)
+                            reasoning = ReasoningEngine().reason(result.to_dict(), obd_codes)
                         except BaseException as exc:
                             import traceback
                             reasoning = None
