@@ -126,7 +126,12 @@ def _window_vectors(path, win_s: float = 10.0, sr: int = config.SR_CLAP) -> np.n
                             duration=win_s)
         # skip too-short OR near-silent windows: embedding silence with CLAP lands
         # near the fault cluster and would produce a confident (wrong) verdict
-        if len(y) < sr // 2 or float(np.max(np.abs(y))) < 1e-3:
+        peak = float(np.max(np.abs(y))) if len(y) else 0.0
+        import sys
+        print(f"[audio-debug] window off={off:.2f}s samples={len(y)} sr={sr} "
+              f"peak_amplitude={peak:.6f} dtype={y.dtype if len(y) else None}",
+              file=sys.stderr, flush=True)
+        if len(y) < sr // 2 or peak < 1e-3:
             continue
         vecs.append(embed_clip(y, sr=sr))
     if not vecs:
