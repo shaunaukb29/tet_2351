@@ -2,6 +2,11 @@ streamlit>=1.35.0,<2
 # Prevent old generated Streamlit protobuf modules from being paired with protobuf 5/6.
 protobuf>=3.20.3,<5
 librosa>=0.10.1
+# Force modern numba/llvmlite — librosa pulls these in transitively, and
+# without an explicit floor the resolver can pick an ancient numba/llvmlite
+# pair that only supports Python <3.10 and fails to build on newer Python.
+numba>=0.60.0
+llvmlite>=0.43.0
 soundfile>=0.12.1
 torch>=2.0.1
 torchaudio>=2.0.2
